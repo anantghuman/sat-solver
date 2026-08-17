@@ -1,5 +1,9 @@
+from pathlib import Path
+
 from solver.cdcl import check_assignment, solve
-from solver.parser import Cnf
+from solver.parser import Cnf, parse_dimacs
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 def _cnf(clauses, n=None):
@@ -41,4 +45,9 @@ def test_chain_of_implications():
     # x1 → x2 → x3 → x4 with x1 asserted, and -x4 asserted → UNSAT
     cnf = _cnf([[-1, 2], [-2, 3], [-3, 4], [1], [-4]])
     r = solve(cnf)
+    assert not r.sat
+
+
+def test_dubois_unsat():
+    r = solve(parse_dimacs(REPO / "dubois.txt"))
     assert not r.sat

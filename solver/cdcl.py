@@ -120,43 +120,105 @@ class Solver:
                 return conflict
         return None
 
+    # ---- Conflict analysis (1-UIP) ------------------------------------------
+
+    def analyze(self, conflict: Clause) -> tuple[list[int], int, list[int]]:
+        """1-UIP conflict analysis.
+
+        Returns (learned_clause, backjump_level, seen_vars_for_bumping).
+        The learned clause is arranged so that:
+          - lits[0] is the asserting literal (unique current-level literal)
+          - lits[1] (if present) is a literal at backjump_level
+        which is what the watched-literal invariant needs after backjumping.
+        """
+        trail = self.trail
+        current_level = trail.decision_level
+        seen = [False] * (self.num_vars + 1)
+        learned: list[int] = [0]  # slot 0 is the asserting lit, filled at end
+        seen_vars: list[int] = []
+        counter = 0  # unresolved literals still at current_level
+        p_lit = 0
+        reason: Optional[Clause] = conflict
+        idx = len(trail.entries) - 1
+
+        while True:
+            assert reason is not None
+            # Resolve on reason. Skip `p_lit`'s variable on the first non-conflict
+            # iteration (that variable was resolved away).
+            for lit in reason.lits:
+                v = abs(lit)
+                if seen[v] or v == abs(p_lit):
+                    continue
+                lvl = trail.levels[v]
+                if lvl <= 0:
+                    continue
+                seen[v] = True
+                seen_vars.append(v)
+                if lvl >= current_level:
+                    counter += 1
+                else:
+                    learned.append(lit)
+            # Walk back to the next seen variable on the current level.
+            while idx >= 0 and not seen[trail.entries[idx].var]:
+                idx -= 1
+            if idx < 0:
+                # Should not happen for a well-formed conflict.
+                raise RuntimeError("conflict analysis walked off the trail")
+            e = trail.entries[idx]
+            p_lit = e.var if e.value else -e.var
+            reason = trail.antecedents[e.var]
+            idx -= 1
+            counter -= 1
+            if counter == 0:
+                # The asserting UIP is `-p_lit`.
+                learned[0] = -p_lit
+                break
+
+        if len(learned) == 1:
+            backjump_level = 0
+        else:
+            # Move the highest-level non-asserting literal to position 1.
+            max_pos = 1
+            max_level = trail.levels[abs(learned[1])]
+            for k in range(2, len(learned)):
+                lvl = trail.levels[abs(learned[k])]
+                if lvl > max_level:
+                    max_level = lvl
+                    max_pos = k
+            if max_pos != 1:
+                learned[1], learned[max_pos] = learned[max_pos], learned[1]
+            backjump_level = max_level
+
+        return learned, backjump_level, seen_vars
+
     # ---- Main loop ----------------------------------------------------------
 
     def solve(self, trace_hook: Optional[Callable[["Solver", int], None]] = None) -> SolveResult:
         if self._unsat:
             return SolveResult(sat=False, assignment=None, stats=self.stats)
 
-        # Chronological DPLL: track per-decision-level "has this decision
-        # already tried its opposite phase?" 1-UIP conflict-driven learning
-        # replaces this in the next commit.
-        flipped: list[bool] = [False]  # index by decision level; [0] unused.
-
         while True:
             conflict = self.propagate()
             if conflict is not None:
                 self.stats.conflicts += 1
-                # Walk up the trail to find a decision whose second phase is
-                # untried; if none, formula is UNSAT.
-                found = False
-                while self.trail.decision_level > 0:
-                    level = self.trail.decision_level
-                    was_flipped = flipped[level]
-                    dec = self.trail.entries[self.trail.level_starts[level]]
-                    popped = self.trail.backjump(level - 1)
-                    for v in popped:
-                        self.brancher.on_unassign(v)
-                    self._propagation_queue_head = len(self.trail.entries)
-                    flipped.pop()
-                    if not was_flipped:
-                        flipped_lit = -dec.var if dec.value else dec.var
-                        self.trail.new_decision_level()
-                        flipped.append(True)
-                        self.trail.enqueue(flipped_lit, None)
-                        self.brancher.on_assign(abs(flipped_lit), flipped_lit > 0)
-                        found = True
-                        break
-                if not found:
+                if self.trail.decision_level == 0:
                     return SolveResult(sat=False, assignment=None, stats=self.stats)
+                learned, backjump_level, seen_vars = self.analyze(conflict)
+                self.brancher.on_conflict(learned, seen_vars)
+                popped = self.trail.backjump(backjump_level)
+                for v in popped:
+                    self.brancher.on_unassign(v)
+                self._propagation_queue_head = len(self.trail.entries)
+                # Install learned clause with watches on the asserting lit (0)
+                # and (if any) the highest-level other lit (1).
+                if len(learned) == 1:
+                    self.trail.enqueue(learned[0], None)
+                    self.brancher.on_assign(abs(learned[0]), learned[0] > 0)
+                else:
+                    c = self.store.add_learned_watched(learned, 0, 1)
+                    self.stats.learned += 1
+                    self.trail.enqueue(learned[0], c)
+                    self.brancher.on_assign(abs(learned[0]), learned[0] > 0)
                 continue
 
             if len(self.trail.entries) == self.num_vars:
@@ -169,7 +231,6 @@ class Solver:
             if trace_hook is not None:
                 trace_hook(self, lit)
             self.trail.new_decision_level()
-            flipped.append(False)
             self.trail.enqueue(lit, None)
             self.brancher.on_assign(abs(lit), lit > 0)
 
