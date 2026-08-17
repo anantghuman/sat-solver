@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .branching import Brancher, FirstUnassignedBrancher
+from .branching import Brancher, VSIDSBrancher, luby
 from .clause import Clause, ClauseStore
 from .parser import Cnf
 from .trail import Trail
@@ -26,13 +26,21 @@ class SolveResult:
 
 
 class Solver:
-    def __init__(self, cnf: Cnf, brancher: Optional[Brancher] = None) -> None:
+    def __init__(
+        self,
+        cnf: Cnf,
+        brancher: Optional[Brancher] = None,
+        *,
+        restart_unit: int = 32,
+    ) -> None:
         self.num_vars = cnf.num_vars
         self.store = ClauseStore(cnf.num_vars)
         self.trail = Trail(cnf.num_vars)
-        self.brancher: Brancher = brancher or FirstUnassignedBrancher()
+        self.brancher: Brancher = brancher or VSIDSBrancher(cnf.num_vars)
         self.stats = SolveStats()
         self._propagation_queue_head = 0
+        self._restart_schedule = luby(restart_unit)
+        self._conflicts_until_restart = next(self._restart_schedule)
         self._unsat = False
         for lits in cnf.clauses:
             if self._add_input_clause(lits) is False:
@@ -219,6 +227,14 @@ class Solver:
                     self.stats.learned += 1
                     self.trail.enqueue(learned[0], c)
                     self.brancher.on_assign(abs(learned[0]), learned[0] > 0)
+                self._conflicts_until_restart -= 1
+                if self._conflicts_until_restart <= 0 and self.trail.decision_level > 0:
+                    popped = self.trail.backjump(0)
+                    for v in popped:
+                        self.brancher.on_unassign(v)
+                    self._propagation_queue_head = len(self.trail.entries)
+                    self._conflicts_until_restart = next(self._restart_schedule)
+                    self.stats.restarts += 1
                 continue
 
             if len(self.trail.entries) == self.num_vars:
