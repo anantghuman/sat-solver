@@ -14,10 +14,9 @@ def _build_brancher(name: str, num_vars: int, model_path: Optional[str]) -> Bran
     if name == "vsids":
         return VSIDSBrancher(num_vars)
     if name == "gnn":
-        # Imported lazily so `--brancher vsids` works without torch installed.
-        from .gnn_brancher import GNNBrancher  # noqa: F401 — placeholder for PR 2
         if model_path is None:
             raise SystemExit("--brancher gnn requires --model PATH")
+        from .gnn_brancher import GNNBrancher
         return GNNBrancher(num_vars, model_path)
     raise SystemExit(f"unknown brancher {name!r}")
 
