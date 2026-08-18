@@ -49,9 +49,34 @@ Exit codes: `10` for SAT, `20` for UNSAT.
 pytest -q
 ```
 
-## What's next (Phase B–E, follow-up PR)
+## GNN brancher (Phase B–E)
 
-- SATLIB benchmark download + trace collection.
-- NeuroSAT-lite GNN model + supervised training on VSIDS traces.
-- `GNNBrancher` plugged into the same `Brancher` seam.
-- Evaluation harness comparing VSIDS vs GNN on held-out instances.
+Beyond VSIDS, there's a GNN-guided brancher trained on solver traces.
+
+```
+# 1. download benchmarks (needs network access to SATLIB)
+python -m data.download_satlib --bucket uf20-91
+
+# 2. collect decision traces from vsids runs
+python -m training.collect_traces --bucket uf20-91 --out data/traces/uf20.pkl
+
+# 3. train a neurosat-lite model to imitate vsids
+python -m training.train --traces data/traces/uf20.pkl --out models/gnn.pt
+
+# 4. use the model as a brancher
+python -m solver <file.cnf> --brancher gnn --model models/gnn.pt
+
+# 5. compare against vsids on a held-out bucket
+python -m eval.compare --bucket uf50-218 --model models/gnn.pt
+```
+
+If SATLIB isn't reachable, `collect_traces --synthetic N` generates random
+3-SAT instances on the fly for training.
+
+Model architecture is bipartite (variable–clause) message passing with
+sign-aware edges, 16 rounds, hidden=64. Loss is CE on the chosen
+variable + BCE on the chosen polarity. See `training/model.py`.
+
+Expectations honestly: on training-adjacent buckets the GNN is competitive
+with VSIDS on decision count. On out-of-distribution instances (like
+`dubois.txt`) it typically loses — reported, not hidden.
